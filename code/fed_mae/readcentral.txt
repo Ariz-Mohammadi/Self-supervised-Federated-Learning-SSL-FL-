@@ -1,0 +1,26 @@
+
+nohup env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/cta/users/undergrad2/SSL-FL \
+/cta/users/undergrad2/miniconda3/envs/ssfl/bin/python -u \
+/cta/users/undergrad2/SSL-FL/code/fed_mae/run_class_finetune_central.py \
+--model vit_base_patch16 \
+--finetune /cta/users/undergrad2/SSL-FL/out_pretrain_retina2_35K/checkpoint-1599.pth \
+--data_set Retina \
+--data_path /cta/users/undergrad2/SSL-FL/data/Retina \
+--batch_size 64 \
+--blr 5e-4 \
+--weight_decay 0.1 \
+--drop_path 0.3 \
+--mixup 0.8 \
+--cutmix 1.0 \
+--warmup_epochs 5 \
+--epochs 100 \
+--nb_classes 2 \
+--global_pool \
+--output_dir /cta/users/undergrad2/SSL-FL/out_finetune_retinabase_35K_central \
+--log_dir /cta/users/undergrad2/SSL-FL/out_finetune_retinabase_35K_central/tb \
+> /cta/users/undergrad2/SSL-FL/finetune_retinabase_35K_central.log 2>&1 &
+
+
+or after revising 
+
+nohup env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/cta/users/undergrad2/SSL-FL /cta/users/undergrad2/miniconda3/envs/ssfl/bin/python -u /cta/users/undergrad2/SSL-FL/code/fed_mae/run_class_finetune_central_2layers.py --model vit_base_patch16 --finetune /cta/users/undergrad2/SSL-FL/out_pretrain_retina2_35K/checkpoint-1599.pth --unfreeze_last 2 --batch_size 256 --lr 5e-5 --warmup_epochs 20 --epochs 300 --output_dir /cta/users/undergrad2/SSL-FL/out_finetune_gentle --nb_classes 2 > /cta/users/undergrad2/SSL-FL/log_finetune_gentle.log 2>&1 &

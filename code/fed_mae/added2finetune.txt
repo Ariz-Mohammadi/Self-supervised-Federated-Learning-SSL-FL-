@@ -1,0 +1,66 @@
+
+    # ===== Load MAE pretrain into ViT encoder =====
+    if args.finetune and os.path.isfile(args.finetune):
+        print(f"=> Loading MAE pretrain from {args.finetune}")
+        ckpt = torch.load(args.finetune, map_location="cpu")
+        state = ckpt.get('model', ckpt)
+        new_state = state.copy()
+
+        # ---- Fix positional embedding mismatch ----
+        if "pos_embed" in new_state:
+            ckpt_pos_embed = new_state["pos_embed"]
+            model_pos_embed = model.pos_embed
+
+            if ckpt_pos_embed.shape != model_pos_embed.shape:
+                print(f"=> Adjusting pos_embed: checkpoint {ckpt_pos_embed.shape} vs model {model_pos_embed.shape}")
+
+                # Drop CLS token (ViT expects only grid here)
+                grid_pos_embed = ckpt_pos_embed[:, 1:]   # [1,196,768]
+
+                # interpolate if grid size differs
+                num_patches = model.patch_embed.num_patches
+                old_size = int(grid_pos_embed.shape[1] ** 0.5)
+                new_size = int(num_patches ** 0.5)
+
+                if old_size != new_size:
+                    def resize_pos_embed(posemb, gs_old, gs_new):
+                        posemb_grid = posemb.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
+                        posemb_grid = torch.nn.functional.interpolate(
+                            posemb_grid, size=(gs_new, gs_new), mode='bicubic', align_corners=False
+                        )
+                        posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_new*gs_new, -1)
+                        return posemb_grid
+
+                    grid_pos_embed = resize_pos_embed(grid_pos_embed, old_size, new_size)
+                    print("=> Interpolated pos_embed grid:", grid_pos_embed.shape)
+
+                # overwrite with fixed pos_embed
+                new_state["pos_embed"] = grid_pos_embed
+                print("=> Final pos_embed set:", new_state["pos_embed"].shape)
+
+        # ---- Filter out MAE-specific keys (decoder, mask_token, etc.) ----
+        allowed_prefixes = ["patch_embed", "pos_embed", "cls_token", "blocks", "norm"]
+        filtered_state = {k: v for k, v in new_state.items()
+                          if any(k.startswith(p) for p in allowed_prefixes)}
+
+        # ---- Load pretrained backbone ----
+        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+        print(f"[finetune load] missing={len(missing)} unexpected={len(unexpected)}")
+        print("Missing keys:", missing[:20])
+        print("Unexpected keys:", unexpected[:20])
+    else:
+        print("WARNING: no pretrain loaded, training from scratch!")
+
+    # === Freeze encoder (as per paper: only train classifier Lk) ===
+    for name, param in model.named_parameters():
+        if not name.startswith("head"):
+            param.requires_grad = False
+    print("=> Encoder frozen; only classification head will be trained.")
+
+    main(args, model)
+
+
+
+this code freezes the whole encoder and just adds a linear layer for classification. accuracy from 26 jumped to 73 in 2 epochs and continued for 8 without
+any improvement. 
+now we wanna unfreeze last two layers and check what will happen. 
