@@ -1,0 +1,9 @@
+# Keep only these
+!code/
+!code/**
+# Ignore everything else
+*
+
+# Exceptions for metadata
+!.gitignore
+!README.md
