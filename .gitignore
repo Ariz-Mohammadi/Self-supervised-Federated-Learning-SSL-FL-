@@ -7,3 +7,9 @@
 # Exceptions for metadata
 !.gitignore
 !README.md
+
+# Ignore Python cache folders
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
