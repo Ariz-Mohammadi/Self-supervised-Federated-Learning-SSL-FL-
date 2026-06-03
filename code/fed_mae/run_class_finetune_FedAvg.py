@@ -353,7 +353,7 @@ if __name__ == '__main__':
         # Fallback for models that might not have a .blocks attribute directly
         num_blocks = model.get_num_layers()
 
-    UNFREEZE_LAST = 4
+    UNFREEZE_LAST = 12
     print(f"Model has {num_blocks} blocks. Unfreezing the last {UNFREEZE_LAST}.")
 
     # Unfreeze the last N transformer blocks, the norm layer, and the head

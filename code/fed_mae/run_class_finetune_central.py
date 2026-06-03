@@ -13,14 +13,35 @@ Centralized fine-tuning for Retina dataset (ViT backbone, MAE-pretrained)
 - Two LR param groups (head vs encoder)
 - Grad clipping
 """
+# -*- coding: utf-8 -*-
+"""
+Centralized fine-tuning for Retina dataset (ViT backbone, MAE-pretrained)
+- 1-logit head + Focal (optional) or BCEWithLogits (baseline)
+- Robust pos_embed resize
+- CLS-token pooling if model outputs per-token logits
+- Inference-time TTA (H-flip only; default OFF for baseline)
+- Two LR param groups (head vs encoder)
+- Grad clipping
+"""
 
-import os, math, sys
+import os, torch
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # hard-pin to your free GPU
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+if device.type == "cuda":
+    print("CUDA device name:", torch.cuda.get_device_name(0))
+    free, total = torch.cuda.mem_get_info()
+    print(f"CUDA mem: free={free/1024**3:.2f} GB / total={total/1024**3:.2f} GB")
+
+
+import math
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from PIL import Image
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
@@ -41,35 +62,35 @@ except ImportError:
 # =========================
 class Args:
     # Paths
-    finetune   = "/cta/users/undergrad2/SSL-FL/out_pretrain_retina_35K/checkpoint-1599.pth"
+    finetune   = "/cta/users/undergrad2/SSL-FL/out_pretrain_retina_12K/checkpoint-1799.pth"
     data_path  = "/cta/users/undergrad2/SSL-FL/data/Retina"
-    output_dir = "/cta/users/undergrad2/SSL-FL/out_finetune_central_tta_focal"
+    output_dir = "/cta/users/undergrad2/SSL-FL/out_finetune_12K_12layers_central_tta_focal"
 
     # Model
     model        = "vit_base_patch16"
     nb_classes   = 2            # API compat; we override head to 1-logit
     global_pool  = True
-    drop_path    = 0.05         # keep modest for fine-tuning (try 0.1 later if needed)
-    unfreeze_last= 6           # fewer blocks unfrozen to preserve MAE features
+    drop_path    = 0.1
+    unfreeze_last= 12
 
     # Training
-    epochs         = 100
-    batch_size     = 256
+    epochs         = 120         # use 20 for quick sanity; raise after verifying
+    batch_size     = 128
     weight_decay   = 0.05
-    base_head_lr   = 1e-3       # head learns faster
-    base_enc_lr    = 3e-4       # encoder adapts gently (lower than before)
+    base_head_lr   = 1e-3
+    base_enc_lr    = 1e-5
     warmup_epochs  = 5
 
-    # Loss selection
-    USE_FOCAL       = False     # True: Focal; False: BCEWithLogits
+    # Loss selection (baseline = BCE)
+    USE_FOCAL       = False      # True: Focal; False: BCEWithLogits
     focal_gamma     = 1.5
-    focal_alpha_pos = 0.5       # upweight positives a bit (override prior). Set None to use prior.
+    focal_alpha_pos = 0.5        # only used if USE_FOCAL=True (set None to use class prior)
 
-    # Sampling
-    USE_SAMPLER    = False      # keep False to avoid double balancing with loss
+    # Sampling (baseline OFF to avoid double balancing)
+    USE_SAMPLER    = False     #when data is 50-50 no need for this
 
-    # Inference-time augmentation (TTA)
-    USE_TTA        = False      # enable TTA at validation (H-flip only)
+    # Inference-time augmentation (TTA) for validation
+    USE_TTA        = True       # baseline OFF; turn on later if you want hflip-TTA
 
     # Device
     device = "cuda"
@@ -79,9 +100,17 @@ class Args:
 # Dataset
 # =========================
 class RetinaCentralDataset(Dataset):
+    """
+    Central finetuning dataset.
+    Loads .jpg/.jpeg/.png normally with PIL.
+    Loads .npy using numpy ? converts to 3-channel RGB image.
+    """
+
     def __init__(self, csv_path, img_root, train=True, img_size=224):
-        self.df = pd.read_csv(csv_path)
-        # assumes: col0=relative path, col1=label
+        import pandas as pd
+        from torchvision import transforms
+
+        self.df = pd.read_csv(csv_path, header=None)
         self.paths  = self.df.iloc[:, 0].astype(str).tolist()
         self.labels = self.df.iloc[:, 1].astype(int).tolist()
         self.img_root = img_root
@@ -89,29 +118,71 @@ class RetinaCentralDataset(Dataset):
         if train:
             self.tfm = transforms.Compose([
                 transforms.RandomResizedCrop(img_size, scale=(0.7, 1.0)),
-                transforms.RandomHorizontalFlip(),
-                # IMPORTANT: remove vertical flip/transpose for fundus geometry
-                transforms.RandomRotation(10),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomApply([
+                    transforms.ColorJitter(brightness=0.2,
+                                           contrast=0.2,
+                                           saturation=0.2)
+                ], p=0.5),
+                transforms.RandomAffine(degrees=5,
+                                        translate=(0.02, 0.02),
+                                        scale=(0.95, 1.05)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485,0.456,0.406],
-                                     std=[0.229,0.224,0.225]),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+                transforms.RandomErasing(p=0.1,
+                                         scale=(0.02, 0.08),
+                                         ratio=(0.3, 3.0),
+                                         inplace=True),
             ])
         else:
             self.tfm = transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(img_size),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485,0.456,0.406],
-                                     std=[0.229,0.224,0.225]),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
             ])
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.img_root, self.paths[idx])
-        img = Image.open(img_path).convert("RGB")
-        return self.tfm(img), self.labels[idx]
+        import numpy as np
+        from PIL import Image
+        import os
+
+        fname = self.paths[idx]
+        label = self.labels[idx]
+        img_path = os.path.join(self.img_root, fname)
+        ext = os.path.splitext(fname)[1].lower()
+
+        # --- handle .npy ---
+        if ext == ".npy":
+            arr = np.load(img_path)  # HxW or HxWxC
+
+            if arr.dtype != np.uint8:
+                a_min, a_max = float(arr.min()), float(arr.max())
+                if a_max > a_min:
+                    arr = (arr - a_min) / (a_max - a_min)
+                else:
+                    arr = np.zeros_like(arr, dtype=np.float32)
+                arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+
+            if arr.ndim == 2:
+                arr = np.stack([arr, arr, arr], axis=-1)
+            elif arr.ndim == 3 and arr.shape[2] == 1:
+                arr = np.repeat(arr, 3, axis=2)
+            # if already HxWx3, leave as is
+
+            img = Image.fromarray(arr).convert("RGB")
+        else:
+            # --- standard images ---
+            img = Image.open(img_path).convert("RGB")
+
+        img = self.tfm(img)
+        return img, label
+
 
 
 # =========================
@@ -120,7 +191,7 @@ class RetinaCentralDataset(Dataset):
 class SigmoidFocalLossWithLogits(nn.Module):
     """
     Binary sigmoid focal loss with logits (stable), per Lin et al. 2017.
-    alpha_pos: weight for positive class (float in [0,1]); alpha_neg = 1 - alpha_pos
+    alpha_pos: weight for positive class in [0,1]; alpha_neg = 1 - alpha_pos
     gamma: focusing parameter >= 0
     """
     def __init__(self, alpha_pos: float = 0.5, gamma: float = 1.5):
@@ -131,7 +202,7 @@ class SigmoidFocalLossWithLogits(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         # logits: [B], targets: [B] float in {0,1}
-        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         p = torch.sigmoid(logits)
         p_t = p * targets + (1 - p) * (1 - targets)
         alpha_t = self.alpha_pos * targets + self.alpha_neg * (1 - targets)
@@ -156,15 +227,12 @@ def forward_with_tta(model: nn.Module, imgs: torch.Tensor) -> torch.Tensor:
     """
     Average LOGITS over conservative TTA views (H-flip only).
     """
-    views = [
-        imgs,
-        torch.flip(imgs, dims=[-1]),               # horizontal flip only
-    ]
+    views = [imgs, torch.flip(imgs, dims=[-1])]
     outs = []
     for v in views:
         o = model(v)
-        outs.append(_cls_pool_logits(o))           # [B]
-    return torch.stack(outs, dim=0).mean(dim=0)    # [B]
+        outs.append(_cls_pool_logits(o))  # [B]
+    return torch.stack(outs, dim=0).mean(dim=0)  # [B]
 
 def train_one_epoch_simple(model, loader, optimizer, device, epoch, criterion):
     model.train()
@@ -173,6 +241,18 @@ def train_one_epoch_simple(model, loader, optimizer, device, epoch, criterion):
     for it, (imgs, labels) in enumerate(loader):
         imgs   = imgs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+
+        # First-batch debug at epoch 0
+        if epoch == 0 and it == 0:
+            with torch.no_grad():
+                dbg_logits = _cls_pool_logits(model(imgs))
+                dbg_probs  = torch.sigmoid(dbg_logits)
+                print("=== DEBUG: first batch ===")
+                print("labels unique:", torch.unique(labels, return_counts=True))
+                print("logits mean=%.4f std=%.4f" % (dbg_logits.mean().item(), dbg_logits.std().item()))
+                print("probs  mean=%.4f  min=%.4f  max=%.4f" %
+                      (dbg_probs.mean().item(), dbg_probs.min().item(), dbg_probs.max().item()))
+                print("==========================")
 
         optimizer.zero_grad()
         logits = model(imgs)
@@ -197,12 +277,14 @@ def train_one_epoch_simple(model, loader, optimizer, device, epoch, criterion):
             acc = 100.0 * correct / max(1, total)
             avg_loss = running_loss / max(1, total)
             lr = optimizer.param_groups[0]["lr"]
-            print(f"[Epoch {epoch} | {it+1}/{len(loader)}] acc={acc:.2f}% loss={avg_loss:.4f} lr={lr:.6f}", flush=True)
+            print("[Epoch %d | %d/%d] acc=%.2f%% loss=%.4f lr=%.6f" %
+                  (epoch, it + 1, len(loader), acc, avg_loss, lr), flush=True)
 
     epoch_loss = running_loss / max(1, total)
     epoch_acc  = 100.0 * correct / max(1, total)
-    print(f"Epoch {epoch}: train loss={epoch_loss:.4f}  train acc={epoch_acc:.2f}%", flush=True)
+    print("Epoch %d: train loss=%.4f  train acc=%.2f%%" % (epoch, epoch_loss, epoch_acc), flush=True)
     return {"loss": epoch_loss, "acc": epoch_acc}
+
 
 @torch.no_grad()
 def validate(model, loader, device, criterion=None, use_tta=True):
@@ -261,7 +343,7 @@ def validate(model, loader, device, criterion=None, use_tta=True):
 def main():
     args = Args()
     device = torch.device(args.device)
-    print(f"Using device: {device}")
+    print("Using device:", device)
 
     # ---- Build model ----
     model = models_vit.__dict__[args.model](
@@ -273,70 +355,79 @@ def main():
     model.head = nn.Linear(in_features, 1)  # single logit
     print("? Installed 1-logit linear head")
 
-    # ---- Load MAE checkpoint (with pos_embed adjust) ----
-    if args.finetune and os.path.isfile(args.finetune):
-        print(f"=> Loading MAE pretrain from {args.finetune}")
-        ckpt = torch.load(args.finetune, map_location="cpu")
-        state = ckpt.get("model", ckpt)
-        enc_state = {k: v for k, v in state.items() if not k.startswith("decoder")}
+    # ======================================================================
+    # ---- Load MAE checkpoint (REQUIRED; do not skip even if path is wrong)
+    # ======================================================================
+    assert isinstance(args.finetune, str) and len(args.finetune) > 0, "Args.finetune is empty."
+    assert os.path.isfile(args.finetune), f"Finetune ckpt not found: {args.finetune}"
+    print("=> Loading MAE pretrain from", args.finetune)
 
-        if "pos_embed" in enc_state and hasattr(model, "pos_embed"):
-            pe_ckpt = enc_state["pos_embed"]       # [1, N_ckpt, C]
-            pe_curr = model.pos_embed              # [1, N_curr, C]
-            if pe_ckpt.shape != pe_curr.shape:
-                num_patches_curr = getattr(model.patch_embed, "num_patches", pe_curr.shape[1]-1)
-                num_extra_curr = pe_curr.shape[1] - num_patches_curr  # 0/1
+    ckpt = torch.load(args.finetune, map_location="cpu")
+    state = ckpt.get("model", ckpt)
+    enc_state = {k: v for k, v in state.items() if not k.startswith("decoder")}
 
-                n_ckpt = pe_ckpt.shape[1]
-                has_cls_ckpt = int((n_ckpt - 1) ** 0.5) ** 2 == (n_ckpt - 1)
-                if has_cls_ckpt:
-                    cls_ckpt, patch_ckpt = pe_ckpt[:, :1], pe_ckpt[:, 1:]
-                else:
-                    cls_ckpt, patch_ckpt = None, pe_ckpt
+    # --- pos_embed adjust (handles 197 -> 196 tokens etc.) ---
+    if "pos_embed" in enc_state and hasattr(model, "pos_embed"):
+        pe_ckpt = enc_state["pos_embed"]       # [1, N_ckpt, C]
+        pe_curr = model.pos_embed              # [1, N_curr, C]
+        if pe_ckpt.shape != pe_curr.shape:
+            num_patches_curr = getattr(model.patch_embed, "num_patches", pe_curr.shape[1] - 1)
+            num_extra_curr = pe_curr.shape[1] - num_patches_curr  # 0/1
 
-                C = patch_ckpt.shape[-1]
-                hw_ckpt = int(patch_ckpt.shape[1] ** 0.5)
-                patch_ckpt = patch_ckpt.reshape(1, hw_ckpt, hw_ckpt, C).permute(0,3,1,2)
+            n_ckpt = pe_ckpt.shape[1]
+            has_cls_ckpt = int((n_ckpt - 1) ** 0.5) ** 2 == (n_ckpt - 1)
+            if has_cls_ckpt:
+                cls_ckpt, patch_ckpt = pe_ckpt[:, :1], pe_ckpt[:, 1:]
+            else:
+                cls_ckpt, patch_ckpt = None, pe_ckpt
 
-                hw_curr = int(num_patches_curr ** 0.5)
-                patch_resized = F.interpolate(patch_ckpt, size=(hw_curr, hw_curr),
-                                              mode="bicubic", align_corners=False)
-                patch_resized = patch_resized.permute(0,2,3,1).reshape(1, hw_curr*hw_curr, C)
+            C = patch_ckpt.shape[-1]
+            hw_ckpt = int(patch_ckpt.shape[1] ** 0.5)
+            patch_ckpt = patch_ckpt.reshape(1, hw_ckpt, hw_ckpt, C).permute(0, 3, 1, 2)
 
-                if num_extra_curr > 0:
-                    if cls_ckpt is None:
-                        cls_ckpt = pe_curr[:, :num_extra_curr]
-                    pe_new = torch.cat([cls_ckpt[:, :num_extra_curr], patch_resized], dim=1)
-                else:
-                    pe_new = patch_resized
+            hw_curr = int(num_patches_curr ** 0.5)
+            patch_resized = F.interpolate(patch_ckpt, size=(hw_curr, hw_curr),
+                                          mode="bicubic", align_corners=False)
+            patch_resized = patch_resized.permute(0, 2, 3, 1).reshape(1, hw_curr * hw_curr, C)
 
-                enc_state["pos_embed"] = pe_new
-                print(f"=> Adjusted pos_embed from {tuple(pe_ckpt.shape)} to {tuple(pe_new.shape)}")
+            if num_extra_curr > 0:
+                if cls_ckpt is None:
+                    cls_ckpt = pe_curr[:, :num_extra_curr]
+                pe_new = torch.cat([cls_ckpt[:, :num_extra_curr], patch_resized], dim=1)
+            else:
+                pe_new = patch_resized
 
-        msg = model.load_state_dict(enc_state, strict=False)
-        try:
-            print(f"[finetune load] missing={len(msg.missing_keys)} unexpected={len(msg.unexpected_keys)}")
-        except Exception:
-            missing, unexpected = msg
-            print(f"[finetune load] missing={len(missing)} unexpected={len(unexpected)}")
+            enc_state["pos_embed"] = pe_new
+            print("=> Adjusted pos_embed from", tuple(pe_ckpt.shape), "to", tuple(pe_new.shape))
+
+    msg = model.load_state_dict(enc_state, strict=False)
+    try:
+        print("[finetune load] missing=%d unexpected=%d" %
+              (len(msg.missing_keys), len(msg.unexpected_keys)))
+    except Exception:
+        missing, unexpected = msg
+        print("[finetune load] missing=%d unexpected=%d" %
+              (len(missing), len(unexpected)))
 
     # ---- Freeze -> unfreeze last K + head + norm ----
     print("Freezing layers...")
-    for p in model.parameters(): p.requires_grad = False
+    for p in model.parameters():
+        p.requires_grad = False
     try:
         num_blocks = len(model.blocks)
     except AttributeError:
         num_blocks = 12
     unf_k = max(int(args.unfreeze_last), 0)
-    print(f"Model has {num_blocks} blocks. Unfreezing the last {unf_k}.")
+    print("Model has %d blocks. Unfreezing the last %d." % (num_blocks, unf_k))
     for name, p in model.named_parameters():
-        if (any(name.startswith(f"blocks.{i}") for i in range(num_blocks - unf_k, num_blocks))
+        if (any(name.startswith("blocks.%d" % i) for i in range(num_blocks - unf_k, num_blocks))
             or name.startswith("head") or name.startswith("norm")):
             p.requires_grad = True
 
     t_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     all_params = sum(p.numel() for p in model.parameters())
-    print(f"=> Trainable params: {t_params/1e6:.2f}M / {all_params/1e6:.2f}M ({100*t_params/all_params:.2f}%)")
+    print("=> Trainable params: %.2fM / %.2fM (%.2f%%)" %
+          (t_params / 1e6, all_params / 1e6, 100.0 * t_params / max(1, all_params)))
     model.to(device)
 
     # ---- Data ----
@@ -345,53 +436,68 @@ def main():
     train_ds = RetinaCentralDataset(train_csv, os.path.join(args.data_path, "train"), train=True)
     val_ds   = RetinaCentralDataset(test_csv,  os.path.join(args.data_path, "test"),  train=False)
 
-    # Labels stats
+    # ===== DEBUG: DATA =====
+    print("=== DEBUG: DATA ===")
+    print("Train size=%d  Val size=%d" % (len(train_ds), len(val_ds)))
+
+    # Labels stats (and keep labels_tensor for sampler option)
     try:
         labels_tensor = torch.as_tensor(train_ds.labels, dtype=torch.long)
     except Exception:
         tmp_loader = DataLoader(train_ds, batch_size=1024, shuffle=False, num_workers=4, pin_memory=True)
         lbls = []
-        for _, y in tmp_loader: lbls.append(y)
+        for _, y in tmp_loader:
+            lbls.append(y)
         labels_tensor = torch.cat(lbls).long()
     class_count = torch.bincount(labels_tensor)
     if len(class_count) < 2:
         class_count = torch.tensor([labels_tensor.eq(0).sum(), labels_tensor.eq(1).sum()])
     n_neg, n_pos = class_count[0].item(), class_count[1].item()
-    print(f"class counts: neg={n_neg} pos={n_pos}")
+    print("class counts (train): neg=%d pos=%d  pos_ratio=%.3f" %
+          (n_neg, n_pos, n_pos / max(1, (n_neg + n_pos))))
+    print("====================")
 
-    # ---- Dataloaders (sampler optional; default off) ----
+    # ---- Dataloaders (sampler optional; baseline: OFF) ----
     if Args.USE_SAMPLER:
         class_weight = (class_count.sum().float() / class_count.float())
         sample_weight = class_weight[labels_tensor].cpu().numpy()
         sampler = WeightedRandomSampler(sample_weight, num_samples=len(sample_weight), replacement=True)
-        dl_train = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, num_workers=4, pin_memory=True)
+        dl_train = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
+                              num_workers=4, pin_memory=True)
         print("=> Using WeightedRandomSampler (turn OFF loss alpha/pos_weight effects)")
     else:
-        dl_train = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        dl_train = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=4, pin_memory=True)
 
-    dl_val   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    dl_val = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                        num_workers=4, pin_memory=True)
 
     # ---- Criterion (Focal or BCE) ----
     if Args.USE_FOCAL:
         if Args.focal_alpha_pos is None:
-            alpha_pos = n_pos / max(1, (n_pos + n_neg))
+            alpha_pos = n_pos / max(1, (n_pos + n_neg))  # class prior
         else:
             alpha_pos = float(Args.focal_alpha_pos)
         criterion = SigmoidFocalLossWithLogits(alpha_pos=alpha_pos, gamma=Args.focal_gamma)
-        print(f"=> Using FocalLoss (alpha_pos={alpha_pos:.3f}, gamma={Args.focal_gamma})")
+        print("=> Using FocalLoss (alpha_pos=%.3f, gamma=%.3f)" % (alpha_pos, Args.focal_gamma))
     else:
         if Args.USE_SAMPLER:
             criterion = nn.BCEWithLogitsLoss()
-            print("=> Using BCEWithLogitsLoss (no pos_weight; sampler handles balance)")
+            print("=> Using BCEWithLogitsLoss (NO pos_weight; sampler handles balance)")
         else:
             pos_weight = torch.tensor([n_neg / max(1, n_pos)], device=device)
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            print(f"=> Using BCEWithLogitsLoss with pos_weight={pos_weight.item():.3f}")
+            print("=> Using BCEWithLogitsLoss with pos_weight=%.3f" % pos_weight.item())
+
+    # Extra debug so we are sure
+    print("=== DEBUG: LOSS PATH CONFIRMED ===")
+    print("USE_FOCAL=%s  USE_SAMPLER=%s" % (str(Args.USE_FOCAL), str(Args.USE_SAMPLER)))
 
     # ---- Optimizer (two groups) ----
     head_params, enc_params = [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad: continue
+        if not p.requires_grad:
+            continue
         (head_params if n.startswith("head") else enc_params).append(p)
 
     optimizer = torch.optim.AdamW(
@@ -399,11 +505,23 @@ def main():
          {"params": enc_params,  "lr": args.base_enc_lr}],
         weight_decay=args.weight_decay
     )
-    print(f"=> AdamW LRs: head={args.base_head_lr:.3g}, encoder={args.base_enc_lr:.3g}, wd={args.weight_decay}")
+    print("=> AdamW LRs: head=%.3g, encoder=%.3g, wd=%.3g" %
+          (args.base_head_lr, args.base_enc_lr, args.weight_decay))
+
+    # Debug optimizer and trainable params
+    head_n = sum(p.numel() for n, p in model.named_parameters()
+                 if n.startswith("head") and p.requires_grad)
+    enc_n  = sum(p.numel() for n, p in model.named_parameters()
+                 if (not n.startswith("head")) and p.requires_grad)
+    print("=== DEBUG: OPT ===")
+    print("Trainable head params=%s  encoder params=%s" % (format(head_n, ","), format(enc_n, ",")))
+    print("LRs: head=%.6f  enc=%.6f  wd=%.6f" % (args.base_head_lr, args.base_enc_lr, args.weight_decay))
+    print("===================")
 
     # ---- LR schedule: warmup -> cosine ----
     eta_min_head = args.base_head_lr * 0.1
     eta_min_enc  = args.base_enc_lr  * 0.1
+
     def set_epoch_lr(ep):
         if ep < args.warmup_epochs:
             f = float(ep + 1) / max(1, args.warmup_epochs)
@@ -424,14 +542,15 @@ def main():
 
     for epoch in range(args.epochs):
         lr_h, lr_e = set_epoch_lr(epoch)
-        print(f"\n===== Epoch {epoch+1} / {args.epochs} =====")
-        print(f"epoch {epoch} LRs -> head={lr_h:.6g} enc={lr_e:.6g}")
+        print("\n===== Epoch %d / %d =====" % (epoch + 1, args.epochs))
+        print("epoch %d LRs -> head=%.6g enc=%.6g" % (epoch, lr_h, lr_e))
 
         _ = train_one_epoch_simple(model, dl_train, optimizer, device, epoch, criterion)
         val_loss, val_acc_best, val_auc, best_t, val_f1, val_bacc = validate(
             model, dl_val, device, criterion, use_tta=Args.USE_TTA
         )
-        print(f"Val: acc@bestT={val_acc_best:.2f}% (T={best_t:.2f})  AUC={val_auc:.3f}  F1={val_f1:.3f}  BalAcc={val_bacc:.3f}  loss={val_loss:.4f}")
+        print("Val: acc@bestT=%.2f%% (T=%.2f)  AUC=%.3f  F1=%.3f  BalAcc=%.3f  loss=%.4f" %
+              (val_acc_best, best_t, val_auc, val_f1, val_bacc, val_loss))
 
         select_score = val_auc if not math.isnan(val_auc) else (val_acc_best / 100.0)
         if select_score > best_score:
@@ -444,9 +563,9 @@ def main():
                  "best_threshold": best_t},
                 os.path.join(args.output_dir, "checkpoint-best.pth")
             )
-            print(f"? Saved new best checkpoint (score={best_score:.4f})")
+            print("? Saved new best checkpoint (score=%.4f)" % best_score)
 
-    print(f"?? Training complete. Best score={best_score:.4f}")
+    print("Training complete. Best score=%.4f" % best_score)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,35 @@
+########For covid data
+
+CUDA_VISIBLE_DEVICES=1 nohup python code/fed_mae/run_class_finetune_FedAvg.py \
+  --model vit_base_patch16 \
+  --data_set COVID-FL \
+  --data_path ./data/COVID-FL \
+  --n_clients 12 \
+  --split_type split_real \
+  --nb_classes 3 \  # or 2 if your task is binary
+  --batch_size 64 \
+  --accum_iter 1 \
+  --blr 3e-3 \
+  --warmup_epochs 5 \
+  --E_epoch 1 \
+  --max_communication_rounds 120 \
+  --num_local_clients -1 \
+  --finetune ./out_pretrain_covidfl/checkpoint-859.pth \
+  --output_dir ./out_finetune_covidfl \
+  --log_dir ./logs_finetune_covidfl \
+  > logs_finetune_covidfl.out 2>&1 &
+
+
+##########################
+
+
 nohup env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/cta/users/undergrad2/SSL-FL /cta/users/undergrad2/miniconda3/envs/ssfl/bin/python -u /cta/users/undergrad2/SSL-FL/code/fed_mae/run_class_finetune_FedAvg.py   --data_set Retina   --data_path /cta/users/undergrad2/SSL-FL/data/Retina   --split_type split_1   --n_clients 5   --num_local_clients -1   --E_epoch 1   --max_communication_rounds 300   --batch_size 256   --blr 3e-3   --layer_decay 0.75   --weight_decay 0.05   --warmup_epochs 5   --model vit_base_patch16   --nb_classes 2   --global_pool   --resume /cta/users/undergrad2/SSL-FL/out_finetune_retina2/checkpoint-199.pth   --output_dir /cta/users/undergrad2/SSL-FL/out_finetune_retina2_resume   --log_dir /cta/users/undergrad2/SSL-FL/out_finetune_retina2_resume/tb > /cta/users/undergrad2/SSL-FL/finetune_retina2_resume2.log 2>&1 &
 
 or you can aslo use this 
 history | grep run_class_finetune_FedAvg.py
+
+
+nohup env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/cta/users/undergrad2/SSL-FL /cta/users/undergrad2/miniconda3/envs/ssfl/bin/python -u /cta/users/undergrad2/SSL-FL/code/fed_mae/run_class_finetune_FedAvg.py   --data_set Retina   --data_path /cta/users/undergrad2/SSL-FL/data/Retina   --split_type split_1   --n_clients 5   --num_local_clients -1   --E_epoch 1   --max_communication_rounds 300   --batch_size 128   --blr 5e-4   --layer_decay 0.75   --weight_decay 0.05   --warmup_epochs 5   --model vit_base_patch16   --nb_classes 2   --global_pool   --finetune /cta/users/undergrad2/SSL-FL/out_pretrain_retina_12K/checkpoint-1799.pth   --output_dir /cta/users/undergrad2/SSL-FL/out_finetune_retina12K_FedAvg   --log_dir /cta/users/undergrad2/SSL-FL/out_finetune_retina12K_FedAvg/tb   > /cta/users/undergrad2/SSL-FL/finetune_retina12K_FedAvg.log 2>&1 &
 
 
 

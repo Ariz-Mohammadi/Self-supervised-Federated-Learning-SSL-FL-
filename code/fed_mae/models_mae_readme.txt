@@ -31,6 +31,14 @@ When use_class_head=True, skips the decoder and returns classification logits.
 When use_class_head=False, follows the standard MAE pipeline (encode ? decode ? reconstruct ? compute loss).
 
 
+CUDA_VISIBLE_DEVICES=1 nohup python code/fed_mae/run_mae_pretrain_FedAvg.py   --model mae_vit_base_patch16   --data_set Retina   --data_path ./data/Retina   --split_type split_1   --mask_ratio 0.6   --batch_size 256   --accum_iter 1   --blr 1e-3   --warmup_epochs 5   --E_epoch 1   --max_communication_rounds 2400   --num_local_clients -1   --output_dir ./out_pretrain_retina2_35K   --log_dir ./logs_pretrain_retina2_35K   --resume ./out_pretrain_retina2_35K/checkpoint-1599.pth   > pretrain_resume_retina_35K.log 2>&1 &
+
+
+
+CUDA_VISIBLE_DEVICES=1 nohup python code/fed_mae/run_mae_pretrain_FedAvg.py   --model mae_vit_base_patch16   --data_set Retina   --data_path ./data/Retina   --split_type split_1   --mask_ratio 0.6   --batch_size 128   --accum_iter 1   --blr 1e-3   --warmup_epochs 5   --E_epoch 1   --max_communication_rounds 2400   --num_local_clients -1   --output_dir ./out_pretrain_retina_12K   --log_dir ./logs_pretrain_retina_12K  
+
+
+
 nohup python code/fed_mae/run_mae_pretrain_FedAvg.py \
   --model mae_vit_large_patch16 \
   --data_set Retina \
@@ -44,6 +52,6 @@ nohup python code/fed_mae/run_mae_pretrain_FedAvg.py \
   --E_epoch 1 \
   --max_communication_rounds 1600 \
   --num_local_clients -1 \
-  --output_dir ./out_pretrain_retina_35K \
-  --log_dir ./logs_pretrain_retina_35K \
+  --output_dir ./out_pretrain_retina2_35K \
+  --log_dir ./logs_pretrain_retina2_35K \
   > pretrain_retina_35K.log 2>&1 & 

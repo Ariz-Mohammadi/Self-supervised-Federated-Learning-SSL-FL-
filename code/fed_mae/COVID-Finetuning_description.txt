@@ -1,0 +1,5 @@
+because there is lots of skewness in the data distribution and some clinets dont ever have some classes.
+the accuracy on the global model was fluctuating between 45 or 32 % . so the model kind of guessing the class. because class distribution was like 
+45-32-23 % . I tried FedProx with values like 0.01 and 0.001 but it didnt work. i discussed this issue with Gemini and it provided me 2 solution, one was FedRS (restricted softmax) and the other one was MOON which was plab B because it is complicated and tricky to implement. 
+
+So far, the server is busy, and I will run the code whenever it is free.

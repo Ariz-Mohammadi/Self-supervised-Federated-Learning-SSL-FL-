@@ -1,15 +1,17 @@
-# Keep only these
-!code/
-!code/**
-# Ignore everything else
+# Ignore everything by default
 *
 
-# Exceptions for metadata
+# Keep the project source code
+!code/
+!code/**
+
+# Keep repository metadata
 !.gitignore
 !README.md
 
-# Ignore Python cache folders
+# Ignore Python cache files inside the source tree
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+
+# Runtime logs
+*.log

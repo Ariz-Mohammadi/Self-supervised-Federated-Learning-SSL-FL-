@@ -111,7 +111,7 @@ def Partial_Client_Selection(args, model, mode='pretrain'):
             #else:
             #    assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
             
-            # Checkpoint from MAE pretraining is missing classification head — expected
+            # Checkpoint from MAE pretraining is missing classification head - expected
             #expected_missing = {'head.weight', 'head.bias'}  # we updated this to the next line
             expected_missing = {'head.weight', 'head.bias','fc_norm.weight', 'fc_norm.bias','cls_head.weight', 'cls_head.bias'}
             
